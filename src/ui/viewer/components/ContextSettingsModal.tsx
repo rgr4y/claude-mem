@@ -439,6 +439,17 @@ export function ContextSettingsModal({
                     />
                   </FormField>
                   <FormField
+                    label="Base URL (Optional)"
+                    tooltip="Custom API base URL — defaults to OpenRouter. Set to use a local proxy or alternative endpoint."
+                  >
+                    <input
+                      type="text"
+                      value={formState.CLAUDE_MEM_OPENROUTER_BASE_URL || ''}
+                      onChange={(e) => updateSetting('CLAUDE_MEM_OPENROUTER_BASE_URL', e.target.value)}
+                      placeholder="https://openrouter.ai/api/v1/chat/completions"
+                    />
+                  </FormField>
+                  <FormField
                     label="App Name (Optional)"
                     tooltip="Your app name for OpenRouter analytics (optional)"
                   >

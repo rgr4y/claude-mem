@@ -29,7 +29,7 @@ import {
   type WorkerRef
 } from './agents/index.js';
 
-// OpenRouter API endpoint
+// OpenRouter API endpoint (overridable via CLAUDE_MEM_OPENROUTER_BASE_URL setting)
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // Context window management constants (defaults, overridable via settings)
@@ -86,7 +86,7 @@ export class OpenRouterAgent {
    */
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
     // Get OpenRouter configuration (pure lookup, no external I/O)
-    const { apiKey, model, siteUrl, appName } = this.getOpenRouterConfig();
+    const { apiKey, model, siteUrl, appName, baseUrl } = this.getOpenRouterConfig();
 
     if (!apiKey) {
       throw new Error('OpenRouter API key not configured. Set CLAUDE_MEM_OPENROUTER_API_KEY in settings or OPENROUTER_API_KEY environment variable.');
@@ -112,7 +112,7 @@ export class OpenRouterAgent {
     session.conversationHistory.push({ role: 'user', content: initPrompt });
 
     try {
-      const initResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
+      const initResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName, baseUrl);
       await this.handleInitResponse(initResponse, session, worker, model);
     } catch (error: unknown) {
       if (error instanceof Error) {
@@ -130,7 +130,7 @@ export class OpenRouterAgent {
     // Process pending messages
     try {
       for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
-        lastCwd = await this.processOneMessage(session, message, lastCwd, apiKey, model, siteUrl, appName, worker, mode);
+        lastCwd = await this.processOneMessage(session, message, lastCwd, apiKey, model, siteUrl, appName, baseUrl, worker, mode);
       }
     } catch (error: unknown) {
       if (error instanceof Error) {
@@ -206,6 +206,7 @@ export class OpenRouterAgent {
     model: string,
     siteUrl: string | undefined,
     appName: string | undefined,
+    baseUrl: string,
     worker: WorkerRef | undefined,
     mode: ModeConfig
   ): Promise<string | undefined> {
@@ -219,12 +220,12 @@ export class OpenRouterAgent {
     if (message.type === 'observation') {
       await this.processObservationMessage(
         session, message, originalTimestamp, lastCwd,
-        apiKey, model, siteUrl, appName, worker, mode
+        apiKey, model, siteUrl, appName, baseUrl, worker, mode
       );
     } else if (message.type === 'summarize') {
       await this.processSummaryMessage(
         session, message, originalTimestamp, lastCwd,
-        apiKey, model, siteUrl, appName, worker, mode
+        apiKey, model, siteUrl, appName, baseUrl, worker, mode
       );
     }
 
@@ -243,6 +244,7 @@ export class OpenRouterAgent {
     model: string,
     siteUrl: string | undefined,
     appName: string | undefined,
+    baseUrl: string,
     worker: WorkerRef | undefined,
     _mode: ModeConfig
   ): Promise<void> {
@@ -265,7 +267,7 @@ export class OpenRouterAgent {
     });
 
     session.conversationHistory.push({ role: 'user', content: obsPrompt });
-    const obsResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
+    const obsResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName, baseUrl);
 
     let tokensUsed = 0;
     if (obsResponse.content) {
@@ -293,6 +295,7 @@ export class OpenRouterAgent {
     model: string,
     siteUrl: string | undefined,
     appName: string | undefined,
+    baseUrl: string,
     worker: WorkerRef | undefined,
     mode: ModeConfig
   ): Promise<void> {
@@ -310,7 +313,7 @@ export class OpenRouterAgent {
     }, mode);
 
     session.conversationHistory.push({ role: 'user', content: summaryPrompt });
-    const summaryResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
+    const summaryResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName, baseUrl);
 
     let tokensUsed = 0;
     if (summaryResponse.content) {
@@ -408,10 +411,28 @@ export class OpenRouterAgent {
    * Convert shared ConversationMessage array to OpenAI-compatible message format
    */
   private conversationToOpenAIMessages(history: ConversationMessage[]): OpenAIMessage[] {
-    return history.map(msg => ({
+    const mapped: OpenAIMessage[] = history.map(msg => ({
       role: msg.role === 'assistant' ? 'assistant' : 'user',
       content: msg.content
     }));
+
+    // Drop leading assistant messages — chat templates require user/system first
+    while (mapped.length > 0 && mapped[0].role === 'assistant') {
+      mapped.shift();
+    }
+
+    // Merge consecutive same-role messages — many templates reject them
+    const merged: OpenAIMessage[] = [];
+    for (const msg of mapped) {
+      const prev = merged[merged.length - 1];
+      if (prev && prev.role === msg.role) {
+        prev.content += '\n\n' + msg.content;
+      } else {
+        merged.push({ ...msg });
+      }
+    }
+
+    return merged;
   }
 
   /**
@@ -423,7 +444,8 @@ export class OpenRouterAgent {
     apiKey: string,
     model: string,
     siteUrl?: string,
-    appName?: string
+    appName?: string,
+    baseUrl: string = OPENROUTER_API_URL
   ): Promise<{ content: string; tokensUsed?: number }> {
     // Truncate history to prevent runaway costs
     const truncatedHistory = this.truncateHistory(history);
@@ -437,7 +459,7 @@ export class OpenRouterAgent {
       estimatedTokens
     });
 
-    const response = await fetch(OPENROUTER_API_URL, {
+    const response = await fetch(baseUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -505,7 +527,7 @@ export class OpenRouterAgent {
    * Get OpenRouter configuration from settings or environment
    * Issue #733: Uses centralized ~/.claude-mem/.env for credentials, not random project .env files
    */
-  private getOpenRouterConfig(): { apiKey: string; model: string; siteUrl?: string; appName?: string } {
+  private getOpenRouterConfig(): { apiKey: string; model: string; siteUrl?: string; appName?: string; baseUrl: string } {
     const settingsPath = USER_SETTINGS_PATH;
     const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
 
@@ -520,7 +542,9 @@ export class OpenRouterAgent {
     const siteUrl = settings.CLAUDE_MEM_OPENROUTER_SITE_URL || '';
     const appName = settings.CLAUDE_MEM_OPENROUTER_APP_NAME || 'claude-mem';
 
-    return { apiKey, model, siteUrl, appName };
+    const baseUrl = settings.CLAUDE_MEM_OPENROUTER_BASE_URL || OPENROUTER_API_URL;
+
+    return { apiKey, model, siteUrl, appName, baseUrl };
   }
 }
 

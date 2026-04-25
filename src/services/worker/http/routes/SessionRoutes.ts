@@ -619,6 +619,14 @@ export class SessionRoutes extends BaseRouteHandler {
       return;
     }
 
+    // Skip trivially short responses (empty results, status confirmations)
+    const responseStr = typeof tool_response === 'string' ? tool_response : JSON.stringify(tool_response ?? '');
+    if (responseStr.length < 50) {
+      logger.debug('SESSION', 'Skipping observation for trivial response', { tool_name, responseLength: responseStr.length });
+      res.json({ status: 'skipped', reason: 'trivial_response' });
+      return;
+    }
+
     // Skip meta-observations: file operations on session-memory files
     const fileOperationTools = new Set(['Edit', 'Write', 'Read', 'NotebookEdit']);
     if (fileOperationTools.has(tool_name) && tool_input) {
