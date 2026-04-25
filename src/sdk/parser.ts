@@ -95,9 +95,22 @@ export function parseObservations(text: string, correlationId?: string): ParsedO
       continue;
     }
 
+    // Synthesize title from other fields when SDK agent omits <title> tag
+    // (common during context truncation when format instructions are dropped)
+    let finalTitle = title;
+    if (!finalTitle) {
+      finalTitle = synthesizeTitle(narrative, subtitle, facts);
+      if (finalTitle) {
+        logger.debug('PARSER', 'Synthesized missing title from other fields', {
+          correlationId,
+          synthesizedTitle: finalTitle
+        });
+      }
+    }
+
     observations.push({
       type: finalType,
-      title,
+      title: finalTitle,
       subtitle,
       facts,
       narrative,
@@ -256,6 +269,16 @@ function coerceObservationToSummary(text: string, sessionId?: number): ParsedSum
   }
 
   return null;
+}
+
+function synthesizeTitle(narrative: string | null, subtitle: string | null, facts: string[]): string | null {
+  const source = subtitle || narrative || facts[0];
+  if (!source) return null;
+  const cleaned = source.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= 80) return cleaned;
+  const truncated = cleaned.slice(0, 77);
+  const lastSpace = truncated.lastIndexOf(' ');
+  return (lastSpace > 40 ? truncated.slice(0, lastSpace) : truncated) + '...';
 }
 
 /**
